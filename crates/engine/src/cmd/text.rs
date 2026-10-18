@@ -96,12 +96,60 @@ fn typing_options(s: &mut Session, text: &str) {
     }
 }
 
+/// When `ch` is a Thai combining character (vowel, tone, diacritic), return the input action
+/// for the current TCB at the caret. Returns `None` for non-Thai or plain consonants so the
+/// normal insert path runs unchanged.
+fn thai_tcb_action(s: &Session, ch: char) -> Option<wordcraft_doc::thai_input::ThaiInputAction> {
+    use wordcraft_doc::thai_input::{ThaiCharClass, thai_char_class, current_tcb, thai_input_action};
+    match thai_char_class(ch) {
+        ThaiCharClass::UpperVowel
+        | ThaiCharClass::LowerVowel
+        | ThaiCharClass::Tone
+        | ThaiCharClass::Diacritic => {}
+        _ => return None,
+    }
+    let focus = &s.sel.focus;
+    let para = s.doc.para_at(focus)?;
+    let tcb = current_tcb(&para.text, focus.off);
+    Some(thai_input_action(&tcb, ch))
+}
+
 fn insert(s: &mut Session, v: &Value) -> CmdResult {
     let text = p::req_str(v, "text")?;
     let raw = p::bool(v, "raw").unwrap_or(false);
     typing_options(s, text);
     let t = if raw { None } else { autoformat(s, text) };
-    type_text(s, t.as_deref().unwrap_or(text))?;
+    let text_to_type = t.as_deref().unwrap_or(text);
+    // Thai input sequence checking: a single Thai combining character (vowel, tone, diacritic)
+    // may replace an existing character in the current TCB rather than append.
+    if !raw && text_to_type.chars().count() == 1 {
+        if let Some(ch) = text_to_type.chars().next() {
+            if let Some(action) = thai_tcb_action(s, ch) {
+                match action {
+                    wordcraft_doc::thai_input::ThaiInputAction::Reject => {
+                        return sel_result(s);
+                    }
+                    wordcraft_doc::thai_input::ThaiInputAction::Replace { bytes } => {
+                        // Delete the character to be replaced, then fall through to insert.
+                        let focus = s.sel.focus.clone();
+                        if s.doc.para_at(&focus).is_some() {
+                            let del_start = focus.off.saturating_sub(bytes);
+                            if del_start < focus.off {
+                                let a = Pos { off: del_start, ..focus.clone() };
+                                let b = focus.clone();
+                                s.sel = crate::Selection { anchor: a, focus: b };
+                                delete_selection(s)?;
+                            }
+                        }
+                        type_text(s, text_to_type)?;
+                        return sel_result(s);
+                    }
+                    wordcraft_doc::thai_input::ThaiInputAction::Accept => {}
+                }
+            }
+        }
+    }
+    type_text(s, text_to_type)?;
     let trigger = text.chars().count() == 1 && text.chars().all(|c| c == ' ' || ",.;:!?".contains(c));
     if raw || !trigger {
         return sel_result(s);
