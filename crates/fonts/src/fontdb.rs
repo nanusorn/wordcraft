@@ -238,6 +238,28 @@ impl FontFace {
         use skrifa::raw::TableProvider;
         self.skrifa().is_some_and(|f| f.gsub().is_ok())
     }
+    /// Does the face's GSUB table contain `feature_tag` under `script_tag`'s default LangSys?
+    ///
+    /// Used to detect whether a font handles complex-script features natively (e.g. `blws` for
+    /// Thai below-base substitution) so we can decide whether to fall back to a better font.
+    /// Returns `false` when the font has no GSUB, the script is absent, or the feature is absent.
+    pub fn has_gsub_feature(&self, script_tag: &[u8; 4], feature_tag: &[u8; 4]) -> bool {
+        use skrifa::raw::TableProvider;
+        use skrifa::raw::tables::layout::ScriptTags;
+        let Some(f) = self.skrifa() else { return false };
+        let Ok(gsub) = f.gsub() else { return false };
+        let Ok(script_list) = gsub.script_list() else { return false };
+        let Ok(feature_list) = gsub.feature_list() else { return false };
+        // ScriptTags::from_unicode handles the Thai/Thai2/DFLT lookup order.
+        let hb_tag = harfrust::Tag::new(script_tag);
+        let Some(sel) = script_list.select(ScriptTags::from_unicode(hb_tag).as_slice()) else { return false };
+        let Ok(entry) = script_list.get(sel.index) else { return false };
+        let script = &*entry;
+        // Check the default LangSys (the one Word uses for plain Thai text).
+        let Some(Ok(lang_sys)) = script.default_lang_sys() else { return false };
+        let ft = harfrust::Tag::new(feature_tag);
+        lang_sys.feature_index_for_tag(&feature_list, ft).is_some()
+    }
     /// Units per em.
     pub fn units_per_em(&self) -> f64 {
         self.upem
