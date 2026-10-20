@@ -463,23 +463,25 @@ mod tests {
 
     #[test]
     fn thai_wraps_at_word_boundaries() {
-        // "อนุรักษ์ภาษาไทย" = อนุรักษ์ (24 B) + ภาษา (12 B) + ไทย (9 B).
+        // "สวัสดีชาวโลก" = สวัสดี (hello) + ชาว (people) + โลก (world).
+        // ICU4X dictionary boundaries: byte 18 (end of สวัสดี) and 27 (end of ชาว).
+        // Each Thai codepoint is 3 UTF-8 bytes: สวัสดี = 6 chars × 3 = 18 bytes, etc.
+        assert_eq!(thai_lao_breaks("สวัสดีชาวโลก"), vec![18, 27]);
+
+        // "อนุรักษ์ภาษาไทย" = อนุรักษ์ (24 B) + ภาษา (12 B) + ไทย (9 B); ICU4X breaks at 24 and 36.
         let thai = "อนุรักษ์ภาษาไทย";
+        assert_eq!(thai_lao_breaks(thai), vec![24, 36]);
+        // Property checks: every break must land on a char boundary, never at 0/end.
         let breaks = thai_lao_breaks(thai);
-        assert!(!breaks.is_empty(), "should find at least one word boundary in Thai text");
-        // Every break must fall on a char boundary.
         for &b in &breaks {
             assert!(thai.is_char_boundary(b), "break at {b} is not a char boundary");
-        }
-        // No break at position 0 or at the end.
-        assert!(!breaks.contains(&0));
-        assert!(!breaks.contains(&thai.len()));
-        // Breaks must not fall inside a Thai character (sanity: all offsets map to is_thai_lao chars).
-        for &b in &breaks {
             let prev = thai.get(..b).and_then(|s| s.chars().next_back()).unwrap();
             let next = thai.get(b..).and_then(|s| s.chars().next()).unwrap();
             assert!(is_thai_lao(prev) && is_thai_lao(next));
         }
+        assert!(!breaks.contains(&0));
+        assert!(!breaks.contains(&thai.len()));
+
         // Latin text: no breaks injected (UAX #14 handles Latin; this function is Thai/Lao only).
         assert!(thai_lao_breaks("Hello world").is_empty());
         // Empty input is fine.

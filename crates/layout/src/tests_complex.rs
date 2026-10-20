@@ -287,9 +287,9 @@ fn khmer_ignores_the_ligature_setting() {
 
 #[test]
 fn thai_without_spaces_wraps_between_words_not_inside_them() {
-    // Repeat a two-word Thai compound to force line breaks.
-    // "แมวกิน" = แมว (cat, 9 bytes) + กิน (eat, 9 bytes); the only legal break is between them.
-    let word = "แมวกิน";
+    // Repeat a Thai compound to force line breaks.
+    // "วัฒนธรรมไทย" = วัฒนธรรม (culture) + ไทย (Thai); the only legal break is between them.
+    let word = "วัฒนธรรมไทย";
     let text = word.repeat(30);
     let l = lay(&Document::from_text(&text));
     let pl = para_layout(&l, 0);
