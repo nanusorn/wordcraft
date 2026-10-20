@@ -414,8 +414,8 @@ mod tests {
 
     #[test]
     fn thai_wraps_at_word_boundaries() {
-        // "แมวกินปลา" = แมว (cat) + กิน (eat) + ปลา (fish).
-        let thai = "แมวกินปลา";
+        // "อนุรักษ์ภาษาไทย" = อนุรักษ์ (24 B) + ภาษา (12 B) + ไทย (9 B).
+        let thai = "อนุรักษ์ภาษาไทย";
         let breaks = thai_lao_breaks(thai);
         assert!(!breaks.is_empty(), "should find at least one word boundary in Thai text");
         // Every break must fall on a char boundary.
@@ -436,7 +436,7 @@ mod tests {
         // Empty input is fine.
         assert!(thai_lao_breaks("").is_empty());
         // Mixed: breaks are only between Thai characters, not at the Thai–Latin boundary.
-        let mixed = "testแมวกินปลาtest";
+        let mixed = "testอนุรักษ์ภาษาไทยtest";
         for &b in &thai_lao_breaks(mixed) {
             let prev = mixed.get(..b).and_then(|s| s.chars().next_back()).unwrap();
             let next = mixed.get(b..).and_then(|s| s.chars().next()).unwrap();
