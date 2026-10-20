@@ -284,3 +284,22 @@ fn khmer_ignores_the_ligature_setting() {
     assert_eq!(gids(Some(hd)), gids(None));
     assert_eq!(gids(Ligatures::from_ooxml("none")), gids(None));
 }
+
+#[test]
+fn thai_without_spaces_wraps_between_words_not_inside_them() {
+    // Repeat a two-word Thai compound to force line breaks.
+    // "แมวกิน" = แมว (cat, 9 bytes) + กิน (eat, 9 bytes); the only legal break is between them.
+    let word = "แมวกิน";
+    let text = word.repeat(30);
+    let l = lay(&Document::from_text(&text));
+    let pl = para_layout(&l, 0);
+    assert!(pl.lines.len() > 1, "a long Thai paragraph must wrap");
+    let breaks = wordcraft_doc::cluster::thai_lao_breaks(&text);
+    // Every line boundary must start at a word boundary returned by the ICU4X segmenter.
+    for line in pl.lines.iter().skip(1) {
+        let start = pl.clusters[line.c0].start;
+        assert!(breaks.contains(&start), "line starts mid-word at byte {start}");
+    }
+    // Lines must be reasonably full (more than a handful of clusters).
+    assert!(pl.lines[0].c1 - pl.lines[0].c0 > 4, "lines should not be trivially short");
+}
