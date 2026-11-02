@@ -627,6 +627,156 @@ pub fn thai_input_action(tcb: &[(usize, char)], new_char: char, prev_char: Optio
     }
 }
 
+/// Normalize Thai character sequences in arbitrary text (for paste and plain-text import).
+///
+/// Runs a two-phase canonicalizer over `text`:
+///
+/// **Phase 1 — Collect:** walk left-to-right, grouping each Thai consonant and its
+/// following combining marks into a TCB buffer.  Non-Thai characters (and leading
+/// vowels, which are stored after their consonant) flush the current buffer and are
+/// emitted unchanged.
+///
+/// **Phase 2 — Reorder:** emit each buffered TCB in canonical WTT 2.0 order:
+/// `[consonant] → [vowel slot] → [tone/karan/diacritic slot]`
+/// with Form A2 (`[consonant] [tone] [sara_am]`) preserved.
+///
+/// Conflict resolution (same as keystroke path):
+/// - Two vowels in one TCB → last one wins.
+/// - Two slot-2 marks in one TCB → last one wins.
+/// - Floating combining mark (no consonant) → dropped silently.
+/// - Wrong order, no conflict → reordered, no data lost.
+///
+/// Non-Thai text passes through unchanged.
+pub fn thai_normalize(text: &str) -> String {
+    /// A single TCB accumulator: consonant + up to one vowel-slot + up to one slot-2 mark,
+    /// OR a consonant + one pali mark (Form B).
+    #[derive(Default)]
+    struct Tcb {
+        consonant: Option<char>,
+        vowel: Option<char>,    // UpperVowel | LowerVowel | SaraAm
+        slot2: Option<char>,    // Tone | Karan | Diacritic
+        pali: Option<char>,     // PaliMark — exclusive with vowel/slot2
+    }
+
+    impl Tcb {
+        /// Push `c` (a Thai combining mark) into the accumulator.
+        /// Returns `false` if `c` must be dropped (floating mark — no consonant).
+        fn push_mark(&mut self, c: char) -> bool {
+            if self.consonant.is_none() {
+                return false; // floating mark — drop silently
+            }
+            match thai_char_class(c) {
+                ThaiCharClass::UpperVowel | ThaiCharClass::LowerVowel | ThaiCharClass::SaraAm => {
+                    // Pali path: new vowel displaces pali mark.
+                    if self.pali.is_some() {
+                        self.pali = None;
+                    }
+                    // Form A2 check: if we already have [tone + sara_am], and now we get
+                    // another vowel, last one wins — evict both old vowel and slot2.
+                    if self.vowel == Some(SARA_AM) {
+                        self.slot2 = None;
+                    }
+                    self.vowel = Some(c); // last wins
+                }
+                ThaiCharClass::Tone | ThaiCharClass::Karan | ThaiCharClass::Diacritic => {
+                    // Pali path: new slot-2 mark displaces pali mark.
+                    if self.pali.is_some() {
+                        self.pali = None;
+                    }
+                    self.slot2 = Some(c); // last wins
+                }
+                ThaiCharClass::PaliMark => {
+                    // Pali mark displaces any existing vowel/slot2.
+                    self.vowel = None;
+                    self.slot2 = None;
+                    self.pali = Some(c); // last wins
+                }
+                _ => {}
+            }
+            true
+        }
+
+        /// Emit the TCB in canonical order: consonant → vowel → slot2 (or consonant → pali).
+        /// Form A2: consonant + tone + sara_am — preserved as-is if vowel == SaraAm.
+        fn emit(&self, out: &mut String) {
+            let Some(cons) = self.consonant else { return };
+            out.push(cons);
+            if let Some(p) = self.pali {
+                out.push(p);
+                return;
+            }
+            match (self.vowel, self.slot2) {
+                (None, None) => {}
+                (None, Some(s2)) => out.push(s2),
+                (Some(v), None) => out.push(v),
+                (Some(v), Some(s2)) => {
+                    if v == SARA_AM {
+                        // Form A2: [consonant] [tone] [sara_am] — tone before sara_am.
+                        out.push(s2);
+                        out.push(v);
+                    } else {
+                        // Normal: [consonant] [vowel] [slot2]
+                        out.push(v);
+                        out.push(s2);
+                    }
+                }
+            }
+        }
+
+        fn clear(&mut self) {
+            self.consonant = None;
+            self.vowel = None;
+            self.slot2 = None;
+            self.pali = None;
+        }
+    }
+
+    // Fast-path: skip allocation entirely if no Thai is present.
+    let has_thai = text.chars().any(|c| matches!(thai_char_class(c),
+        ThaiCharClass::Consonant | ThaiCharClass::UpperVowel | ThaiCharClass::LowerVowel
+        | ThaiCharClass::Tone | ThaiCharClass::Karan | ThaiCharClass::Diacritic
+        | ThaiCharClass::PaliMark | ThaiCharClass::SaraAm | ThaiCharClass::LeadingVowel
+    ));
+    if !has_thai {
+        return text.to_owned();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut tcb = Tcb::default();
+
+    for c in text.chars() {
+        match thai_char_class(c) {
+            ThaiCharClass::Consonant => {
+                // New consonant: flush pending TCB, start a new one.
+                tcb.emit(&mut out);
+                tcb.clear();
+                tcb.consonant = Some(c);
+            }
+            ThaiCharClass::UpperVowel
+            | ThaiCharClass::LowerVowel
+            | ThaiCharClass::SaraAm
+            | ThaiCharClass::Tone
+            | ThaiCharClass::Karan
+            | ThaiCharClass::Diacritic
+            | ThaiCharClass::PaliMark => {
+                // Combining mark: try to attach to current TCB.
+                // Drop silently if no consonant has been seen yet.
+                tcb.push_mark(c);
+            }
+            ThaiCharClass::LeadingVowel | ThaiCharClass::Other => {
+                // Non-combining Thai (leading vowels) and non-Thai: flush TCB and pass through.
+                tcb.emit(&mut out);
+                tcb.clear();
+                out.push(c);
+            }
+        }
+    }
+    // Flush any remaining TCB.
+    tcb.emit(&mut out);
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,5 +1268,107 @@ mod tests {
         assert_eq!(action("hello", THANTHAKHAT), ThaiInputAction::Reject);
 
         let _ = SARA_II;
+    }
+
+    // ── thai_normalize ───────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_passthrough_latin() {
+        assert_eq!(thai_normalize("hello world"), "hello world");
+        assert_eq!(thai_normalize(""), "");
+        assert_eq!(thai_normalize("123 abc"), "123 abc");
+    }
+
+    #[test]
+    fn normalize_correct_order_unchanged() {
+        // กิ้ is already [ก][ิ][้] — must come out unchanged.
+        let s = "กิ้";
+        assert_eq!(thai_normalize(s), s);
+        // กำ is [ก][ำ] — unchanged.
+        let s2 = "กำ";
+        assert_eq!(thai_normalize(s2), s2);
+        // Form A2: กั่ → already [ก][ั][่], unchanged.
+        let s3 = "กั่";
+        assert_eq!(thai_normalize(s3), s3);
+    }
+
+    #[test]
+    fn normalize_wrong_order_reordered() {
+        // Tone before vowel: ก + ้ + ิ → reordered to ก + ิ + ้
+        let wrong = format!("ก\u{0E49}\u{0E34}"); // ก้ิ
+        let expected = format!("ก\u{0E34}\u{0E49}"); // กิ้
+        assert_eq!(thai_normalize(&wrong), expected);
+    }
+
+    #[test]
+    fn normalize_form_a2_tone_before_sara_am() {
+        // Form A2: consonant + sara_am + tone → reordered to consonant + tone + sara_am.
+        // Input:  ก ำ ่   (sara_am then tone — wrong order)
+        // Output: ก ่ ำ   (tone then sara_am — canonical Form A2)
+        let wrong = format!("ก{}{}", SARA_AM, MAIEK);
+        let expected = format!("ก{}{}", MAIEK, SARA_AM);
+        assert_eq!(thai_normalize(&wrong), expected);
+    }
+
+    #[test]
+    fn normalize_two_vowels_last_wins() {
+        // กิี → two UpperVowels: sara_i then sara_ii → last wins: กี
+        let two_vowels = format!("ก{}{}", SARA_I, SARA_II);
+        let expected = format!("ก{}", SARA_II);
+        assert_eq!(thai_normalize(&two_vowels), expected);
+    }
+
+    #[test]
+    fn normalize_two_tones_last_wins() {
+        // กิ่้ → กิ + two tones: maiek then maitho → last wins: กิ้
+        let two_tones = format!("ก{}{}{}", SARA_I, MAIEK, MAITHO);
+        let expected = format!("ก{}{}", SARA_I, MAITHO);
+        assert_eq!(thai_normalize(&two_tones), expected);
+    }
+
+    #[test]
+    fn normalize_floating_mark_dropped() {
+        // Combining mark with no preceding consonant — dropped silently.
+        let floating = format!("{}abc", SARA_I);
+        assert_eq!(thai_normalize(&floating), "abc");
+        // Two floating marks.
+        let two_floating = format!("{}{}abc", MAIEK, SARA_U);
+        assert_eq!(thai_normalize(&two_floating), "abc");
+    }
+
+    #[test]
+    fn normalize_mixed_thai_latin() {
+        // Latin passthrough: correct order must be unchanged.
+        let correct = "hello กิ้ world";
+        assert_eq!(thai_normalize(correct), correct);
+        // Wrong order inside a Thai word surrounded by Latin — tone before vowel.
+        let wrong = format!("hello ก{}{}  world", MAITHO, SARA_I);
+        let expected = format!("hello ก{}{}  world", SARA_I, MAITHO);
+        assert_eq!(thai_normalize(&wrong), expected);
+    }
+
+    #[test]
+    fn normalize_pali_mark_displaces_vowel() {
+        // ก + vowel + nikhahit → nikhahit displaces vowel → กํ
+        let with_vowel_then_pali = format!("ก{}{}", SARA_I, NIKHAHIT);
+        let expected = format!("ก{}", NIKHAHIT);
+        assert_eq!(thai_normalize(&with_vowel_then_pali), expected);
+    }
+
+    #[test]
+    fn normalize_vowel_displaces_pali_mark() {
+        // ก + nikhahit + vowel → vowel displaces nikhahit → กิ
+        let with_pali_then_vowel = format!("ก{}{}", NIKHAHIT, SARA_I);
+        let expected = format!("ก{}", SARA_I);
+        assert_eq!(thai_normalize(&with_pali_then_vowel), expected);
+    }
+
+    #[test]
+    fn normalize_multiple_tcbs() {
+        // Two consecutive TCBs, both with wrong order.
+        // ก้ิ + ข้ิ → กิ้ + ขิ้
+        let wrong = format!("ก\u{0E49}\u{0E34}ข\u{0E49}\u{0E34}");
+        let expected = format!("ก\u{0E34}\u{0E49}ข\u{0E34}\u{0E49}");
+        assert_eq!(thai_normalize(&wrong), expected);
     }
 }

@@ -112,6 +112,7 @@ pub fn import(bytes: &[u8]) -> Document {
     let text = decode(bytes);
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let clean: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t' | '\u{000C}')).collect();
+    let clean = wordcraft_doc::thai_input::thai_normalize(&clean);
     Document::from_text(&clean)
 }
 

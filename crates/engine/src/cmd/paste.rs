@@ -298,6 +298,15 @@ pub fn paste_fragment(s: &mut Session, v: &Value) -> Result<Fragment, CmdError> 
 pub fn insert_text(s: &mut Session, text: &str) -> Result<(), CmdError> {
     // Only our own cut, pasted straight after it, becomes a move (see `insert`).
     s.pending_move = None;
+    // Normalize Thai character sequences (wrong TCB order, slot conflicts, floating marks)
+    // unless Track Changes is recording — raw text is preserved verbatim under revision tracking.
+    let normalized;
+    let text = if !s.doc.settings.track_changes {
+        normalized = wordcraft_doc::thai_input::thai_normalize(text);
+        normalized.as_str()
+    } else {
+        text
+    };
     super::paste_text(s, &text.replace("\r\n", "\r").replace('\n', "\r"))
 }
 
